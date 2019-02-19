@@ -222,10 +222,11 @@ class Comparators(object):
 exit = Event()
 
 def main():
+    log = initLog()
+    log.info("Startup Teamcity Active Directory Synchronizer")
     while not exit.is_set():
         #Start application
-        log = initLog()
-        log.info("Start Teamcity Active Directory Synchronizer")
+        log.info("Run Synchronizer")
 
         # Parse CLI arguments
         args = get_args()
@@ -260,7 +261,9 @@ def main():
         teamcity_new_groups = compare.diff_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
 
         #Create new groups in Teamcity
-        tc.create_groups(teamcity_new_groups)
+        if len(teamcity_new_groups) > 0:
+            log.info("Add group {} to Teamcity".format(teamcity_new_groups))
+            tc.create_groups(teamcity_new_groups)
 
         #Get new ldap groups to generate ldap-mapping.xml
         ldap_new_groups = compare.sim_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
@@ -276,7 +279,7 @@ def main():
 
         #wait next loop hoop
         exit.wait(5)
-    print("All done!")
+    log.info("Successful stop Teamcity Active Directory Synchronizer")
 
 def quit(signo, _frame):
     print("Interrupted by %d, shutting down" % signo)
