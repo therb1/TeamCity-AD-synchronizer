@@ -2,3 +2,4 @@ ldap3==2.5.2
 requests==2.21.0
 pyasn1==0.4.5
 lxml==4.3.1
+Logbook==1.4.3

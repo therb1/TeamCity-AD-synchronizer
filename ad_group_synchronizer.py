@@ -8,6 +8,8 @@ from string import ascii_letters, digits
 import random
 from lxml import etree
 import json
+from threading import Event
+from loginit import initLog
 
 
 def get_args():
@@ -46,6 +48,7 @@ class createConfig(object):
                 self.ldap_pass = parser.get('ldap', 'bindpass')
                 self.groups_search_scope = parser.get('ldap', 'groups_search_scope')
                 self.groups_search_base_list = re.findall(r"['\"](.*?)['\"]", parser.get('ldap', 'groups_search_base_list'))
+                self.custom_groups_list = re.findall(r"['\"](.*?)['\"]", parser.get('ldap', 'custom_groups_list'))
 
                 self.tc_server = parser.get('teamcity', 'server')
                 self.tc_username = parser.get('teamcity', 'username')
@@ -216,49 +219,73 @@ class Comparators(object):
                 diff_groups.append({'ldapGroupDn': xml_group_obj.get('ldapGroupDn'), "key": xml_group_obj.get('teamcityGroupKey')})
         return diff_groups
 
+exit = Event()
+
 def main():
-    # Parse CLI arguments
-    args = get_args()
+    while not exit.is_set():
+        #Start application
+        log = initLog()
+        log.info("Start Teamcity Active Directory Synchronizer")
 
-    # Read config file
-    parser = configparser.RawConfigParser()
-    parser.read(args.file)
+        # Parse CLI arguments
+        args = get_args()
 
-    # Create config object from config file
-    config = createConfig(parser)
+        # Read config file
+        parser = configparser.RawConfigParser()
+        parser.read(args.file)
 
-    # Connect to LDAP
-    with LDAPConnector(args, config) as ldap_conn:
-        ldap_group_list = ldap_conn.search_groups(config.groups_search_base_list,config.groups_search_scope)
+        # Create config object from config file
+        config = createConfig(parser)
 
-    # Connect to TeamCity
-    tc = TeamCityClient(config)
-    teamcity_group_list = tc.get_tc_groups()
+        # Connect to LDAP
+        with LDAPConnector(args, config) as ldap_conn:
+            ldap_group_list = ldap_conn.search_groups(config.groups_search_base_list,config.groups_search_scope)
 
-    # Connect to XML? =)
-    xml = xml_changer(config)
-    xml_group_list = xml.get_current_groups()
+            #Add custom groups from config
+            if config.custom_groups_list:
+                ldap_group_list = ldap_group_list + config.custom_groups_list
 
-    #Get all differents and similarities
-    compare = Comparators()
+        # Connect to TeamCity
+        tc = TeamCityClient(config)
+        teamcity_group_list = tc.get_tc_groups()
 
-    #Get groups to create it in teamcity
-    teamcity_new_groups = compare.diff_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
+        # Connect to XML? =)
+        xml = xml_changer(config)
+        xml_group_list = xml.get_current_groups()
 
-    #Create new groups in Teamcity
-    tc.create_groups(teamcity_new_groups)
+        #Get all differents and similarities
+        compare = Comparators()
 
-    #Get new ldap groups to generate ldap-mapping.xml
-    ldap_new_groups = compare.sim_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
+        #Get groups to create it in teamcity
+        teamcity_new_groups = compare.diff_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
 
-    #Get list of groups must be deleted from Teamcity
-    tc_deprecated_groups = compare.diff_xml_ldap_groups(xml_group_list, ldap_new_groups)
+        #Create new groups in Teamcity
+        tc.create_groups(teamcity_new_groups)
 
-    #Delete new groups in Teamcity
-    tc.delete_groups(tc_deprecated_groups)
+        #Get new ldap groups to generate ldap-mapping.xml
+        ldap_new_groups = compare.sim_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
 
-    #Create new groups in xml
-    xml.reganerate_ldap_xml(ldap_new_groups)
+        #Get list of groups must be deleted from Teamcity
+        tc_deprecated_groups = compare.diff_xml_ldap_groups(xml_group_list, ldap_new_groups)
+
+        #Delete new groups in Teamcity
+        tc.delete_groups(tc_deprecated_groups)
+
+        #Create new groups in xml
+        xml.reganerate_ldap_xml(ldap_new_groups)
+
+        #wait next loop hoop
+        exit.wait(5)
+    print("All done!")
+
+def quit(signo, _frame):
+    print("Interrupted by %d, shutting down" % signo)
+    exit.set()
 
 if __name__ == '__main__':
+
+    import signal
+    for sig in ('TERM', 'HUP', 'INT'):
+        signal.signal(getattr(signal, 'SIG'+sig), quit)
+
     main()
