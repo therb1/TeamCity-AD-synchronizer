@@ -47,15 +47,20 @@ class createConfig(object):
                 self.ldap_user = parser.get('ldap', 'binduser')
                 self.ldap_pass = parser.get('ldap', 'bindpass')
                 self.groups_search_scope = parser.get('ldap', 'groups_search_scope')
-                self.groups_search_base_list = re.findall(r"['\"](.*?)['\"]", parser.get('ldap', 'groups_search_base_list'))
-                self.custom_groups_list = re.findall(r"['\"](.*?)['\"]", parser.get('ldap', 'custom_groups_list'))
+                try:
+                    self.groups_search_base_list = re.findall(r"['\"](.*?)['\"]", parser.get('ldap', 'groups_search_base_list'))
+                    self.custom_groups_list = re.findall(r"['\"](.*?)['\"]", parser.get('ldap', 'custom_groups_list'))
+                except:
+                    pass
 
                 self.tc_server = parser.get('teamcity', 'server')
                 self.tc_username = parser.get('teamcity', 'username')
                 self.tc_password = parser.get('teamcity', 'password')
                 self.tc_verify_certificate = parser.get('teamcity', 'verify_certificate')
+                self.tc_timeout = int(parser.get('teamcity', 'timeout'))
 
                 self.path_ldap_mapping = parser.get('xml', 'path_ldap_mapping')
+
 
         except configparser.NoOptionError as e:
             raise SystemExit('Configuration issues detected in %s' % e)
@@ -84,6 +89,7 @@ class LDAPConnector(object):
                                raise_exceptions=True)
 
         self.conn.bind()
+
         return self
 
     def __exit__(self, exctype, exception, traceback):
@@ -123,39 +129,48 @@ class TeamCityClient(object):
         self.session.auth = (config.tc_username, config.tc_password)
         self.session.headers.update({'Content-type': 'application/json', 'Accept': 'application/json', 'Origin': config.tc_server})
         self.session.verify = config.tc_verify_certificate
+        self.timeout = config.tc_timeout
 
     def get_tc_groups(self):
         url = self.rest_url + 'userGroups'
-        groups_in_tc = self.session.get(url, verify=self.session.verify).json()
+        groups_in_tc = self.session.get(url, verify=self.session.verify, timeout=self.timeout)
+        if groups_in_tc.status_code == 200:
+            groups_in_tc = groups_in_tc.json()
+            log.debug("Get group list was successfully from TC")
+        else:
+            log.error("Couldn't get group list from TC. Responce code: {}".format(groups_in_tc.status_code))
+            raise Exception('Teamcity error')
         return [group for group in groups_in_tc['group']]
 
     def create_groups(self, groups_list):
         created_groups_prop = list()
         for group_obj in groups_list:
-            #print("Creating group {} in TC".format(group_obj.get("name")))
+            log.info("Creating group {} in TC".format(group_obj.get("name")))
             url = self.rest_url + 'userGroups'
             key = ''.join(random.choice("{}{}".format(ascii_letters, digits)) for i in range(16))
             created_groups_prop.append({"teamcityGroupKey": key, "ldapGroupDn": group_obj.get("dn")})
-
+            print("123")
             data = json.dumps({"name": group_obj.get("name"), "key": key})
-            resp = self.session.post(url, verify=self.session.verify, data=data)
+            resp = self.session.post(url, verify=self.session.verify, data=data, timeout=self.timeout)
+            print(resp)
             if resp.status_code == 200:
                 self.tc_groups = TeamCityClient.get_tc_groups(self)
                 created_groups_prop.append({"dn": group_obj.get("dn"), "key": key})
+                log.info("The group {} was created successfully in TC".format(group_obj.get("name")))
             else:
-                print("Error: Couldn't create group {}\n{}".format(group_obj.get("name"), resp.content))
+                log.error("Couldn't create group {} in TC \n{}".format(group_obj.get("name"), resp.content))
+                raise Exception('Teamcity error')
         return created_groups_prop
 
     def delete_groups(self, groups_list):
         for group_obj in groups_list:
             url = '{url}userGroups/key:{key}'.format(url=self.rest_url, key=group_obj.get('key'))
-            print(url)
             resp = self.session.delete(url, verify=False)
-            print("resp code is" + str(resp.status_code))
             if resp.status_code == 204:
+                log.info("The group {} was deleted successfully from TC".format(group_obj.get("ldapGroupDn")))
                 return True
             else:
-                print("Error: Couldn't delete group {}\n{}".format(group_obj.get("ldapGroupDn"), resp.content))
+                log.error("Couldn't delete group {}\n{}".format(group_obj.get("ldapGroupDn"), resp.content))
                 return False
 
 
@@ -222,73 +237,83 @@ class Comparators(object):
 exit = Event()
 
 def main():
-    log = initLog()
-    log.info("Startup Teamcity Active Directory Synchronizer")
-    while not exit.is_set():
-        #Start application
-        log.info("Run Synchronizer")
 
-        # Parse CLI arguments
-        args = get_args()
+    #Start application
+    log.info("Run Synchronizer")
 
-        # Read config file
-        parser = configparser.RawConfigParser()
-        parser.read(args.file)
+    # Parse CLI arguments
+    args = get_args()
 
-        # Create config object from config file
-        config = createConfig(parser)
+    # Read config file
+    parser = configparser.RawConfigParser()
+    parser.read(args.file)
 
-        # Connect to LDAP
-        with LDAPConnector(args, config) as ldap_conn:
-            ldap_group_list = ldap_conn.search_groups(config.groups_search_base_list,config.groups_search_scope)
+    # Create config object from config file
+    config = createConfig(parser)
 
-            #Add custom groups from config
-            if config.custom_groups_list:
-                ldap_group_list = ldap_group_list + config.custom_groups_list
+    # Connect to LDAP
+    with LDAPConnector(args, config) as ldap_conn:
+        ldap_group_list = ldap_conn.search_groups(config.groups_search_base_list,config.groups_search_scope)
 
-        # Connect to TeamCity
-        tc = TeamCityClient(config)
-        teamcity_group_list = tc.get_tc_groups()
+        #Add custom groups from config
+        if config.custom_groups_list:
+            ldap_group_list = ldap_group_list + config.custom_groups_list
+        #Check ldap groups and/or ldap custom groups is set
+        if len(ldap_group_list) == 0:
+            log.error("Can't find groups to add to TC. Check ldap groups and/or ldap custom groups is set")
+            raise Exception('Ldap/Config error')
 
-        # Connect to XML? =)
-        xml = xml_changer(config)
-        xml_group_list = xml.get_current_groups()
+    # Connect to TeamCity
+    tc = TeamCityClient(config)
+    teamcity_group_list = tc.get_tc_groups()
 
-        #Get all differents and similarities
-        compare = Comparators()
+    # Connect to XML? =)
+    xml = xml_changer(config)
+    xml_group_list = xml.get_current_groups()
 
-        #Get groups to create it in teamcity
-        teamcity_new_groups = compare.diff_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
+    #Get all differents and similarities
+    compare = Comparators()
 
-        #Create new groups in Teamcity
-        if len(teamcity_new_groups) > 0:
-            log.info("Add group {} to Teamcity".format(teamcity_new_groups))
-            tc.create_groups(teamcity_new_groups)
+    #Get groups to create it in teamcity
+    teamcity_new_groups = compare.diff_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
 
-        #Get new ldap groups to generate ldap-mapping.xml
-        ldap_new_groups = compare.sim_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
+    #Create new groups in Teamcity
+    if len(teamcity_new_groups) > 0:
+        tc.create_groups(teamcity_new_groups)
 
-        #Get list of groups must be deleted from Teamcity
-        tc_deprecated_groups = compare.diff_xml_ldap_groups(xml_group_list, ldap_new_groups)
+    #Get new ldap groups to generate ldap-mapping.xml
+    ldap_new_groups = compare.sim_ldap_teamcity_groups(ldap_group_list, teamcity_group_list)
 
-        #Delete new groups in Teamcity
-        tc.delete_groups(tc_deprecated_groups)
+    #Get list of groups must be deleted from Teamcity
+    tc_deprecated_groups = compare.diff_xml_ldap_groups(xml_group_list, ldap_new_groups)
 
-        #Create new groups in xml
-        xml.reganerate_ldap_xml(ldap_new_groups)
+    #Delete new groups in Teamcity
+    tc.delete_groups(tc_deprecated_groups)
 
-        #wait next loop hoop
-        exit.wait(5)
-    log.info("Successful stop Teamcity Active Directory Synchronizer")
+    #Create new groups in xml
+    xml.reganerate_ldap_xml(ldap_new_groups)
+
+
+
 
 def quit(signo, _frame):
     print("Interrupted by %d, shutting down" % signo)
     exit.set()
 
 if __name__ == '__main__':
+    log = initLog()
+    # wait next loop hoop
+    log.info("Startup Teamcity Active Directory Synchronizer")
 
-    import signal
-    for sig in ('TERM', 'HUP', 'INT'):
-        signal.signal(getattr(signal, 'SIG'+sig), quit)
+    while not exit.is_set():
+        try:
+            import signal
+            for sig in ('TERM', 'HUP', 'INT'):
+                signal.signal(getattr(signal, 'SIG'+sig), quit)
+            main()
+        except Exception as e:
+            log.error(e)
+        #wait next loop hoop
+        exit.wait(1)
 
-    main()
+    log.info("Successful stop Teamcity Active Directory Synchronizer")
