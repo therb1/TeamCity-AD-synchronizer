@@ -10,7 +10,8 @@ from lxml import etree
 import json
 from threading import Event
 from loginit import initLog
-
+from diskcache import Cache
+import time
 
 def get_args():
     def _usage():
@@ -58,7 +59,8 @@ class createConfig(object):
                 self.tc_password = parser.get('teamcity', 'password')
                 self.tc_verify_certificate = parser.get('teamcity', 'verify_certificate')
                 self.tc_timeout = int(parser.get('teamcity', 'timeout'))
-
+                self.tc_cache_file = parser.get('teamcity', 'cache_file')
+                self.tc_cache_ttl = int(parser.get('teamcity', 'cache_ttl'))
                 self.path_ldap_mapping = parser.get('xml', 'path_ldap_mapping')
 
 
@@ -130,6 +132,9 @@ class TeamCityClient(object):
         self.session.headers.update({'Content-type': 'application/json', 'Accept': 'application/json', 'Origin': config.tc_server})
         self.session.verify = config.tc_verify_certificate
         self.timeout = config.tc_timeout
+        self.cache_ttl = config.tc_cache_ttl
+        self.cache = Cache(config.tc_cache_file)
+        self.cache.expire()
 
     def get_tc_groups(self):
         url = self.rest_url + 'userGroups'
@@ -145,33 +150,37 @@ class TeamCityClient(object):
     def create_groups(self, groups_list):
         created_groups_prop = list()
         for group_obj in groups_list:
-            log.info("Creating group {} in TC".format(group_obj.get("name")))
-            url = self.rest_url + 'userGroups'
-            key = ''.join(random.choice("{}{}".format(ascii_letters, digits)) for i in range(16))
-            created_groups_prop.append({"teamcityGroupKey": key, "ldapGroupDn": group_obj.get("dn")})
-            print("123")
-            data = json.dumps({"name": group_obj.get("name"), "key": key})
-            resp = self.session.post(url, verify=self.session.verify, data=data, timeout=self.timeout)
-            print(resp)
-            if resp.status_code == 200:
-                self.tc_groups = TeamCityClient.get_tc_groups(self)
-                created_groups_prop.append({"dn": group_obj.get("dn"), "key": key})
-                log.info("The group {} was created successfully in TC".format(group_obj.get("name")))
-            else:
-                log.error("Couldn't create group {} in TC \n{}".format(group_obj.get("name"), resp.content))
-                raise Exception('Teamcity error')
+            if group_obj.get("dn") not in self.cache and self.cache.get != "deleted":
+                log.info("Creating group {} in TC".format(group_obj.get("name")))
+                url = self.rest_url + 'userGroups'
+                key = ''.join(random.choice("{}{}".format(ascii_letters, digits)) for i in range(16))
+                created_groups_prop.append({"teamcityGroupKey": key, "ldapGroupDn": group_obj.get("dn")})
+                data = json.dumps({"name": group_obj.get("name"), "key": key})
+                resp = self.session.post(url, verify=self.session.verify, data=data, timeout=self.timeout)
+                if resp.status_code == 200:
+                    self.tc_groups = TeamCityClient.get_tc_groups(self)
+                    created_groups_prop.append({"dn": group_obj.get("dn"), "key": key})
+                    log.info("The group {} was created successfully in TC".format(group_obj.get("name")))
+                    self.cache.set(group_obj.get("dn"), "created", expire=self.cache_ttl)
+                    self.cache.close()
+                else:
+                    log.error("Couldn't create group {} in TC \n{}".format(group_obj.get("name"), resp.content))
+                    raise Exception('Teamcity error')
         return created_groups_prop
 
     def delete_groups(self, groups_list):
         for group_obj in groups_list:
-            url = '{url}userGroups/key:{key}'.format(url=self.rest_url, key=group_obj.get('key'))
-            resp = self.session.delete(url, verify=False)
-            if resp.status_code == 204:
-                log.info("The group {} was deleted successfully from TC".format(group_obj.get("ldapGroupDn")))
-                return True
-            else:
-                log.error("Couldn't delete group {}\n{}".format(group_obj.get("ldapGroupDn"), resp.content))
-                return False
+            if group_obj.get("ldapGroupDn") not in self.cache and self.cache.get != "created":
+                url = '{url}userGroups/key:{key}'.format(url=self.rest_url, key=group_obj.get('key'))
+                resp = self.session.delete(url, verify=False)
+                if resp.status_code == 204:
+                    log.info("The group {} was deleted successfully from TC".format(group_obj.get("ldapGroupDn")))
+                    self.cache.set(group_obj.get("ldapGroupDn"), "deleted",expire=self.cache_ttl)
+                    self.cache.close()
+                    return True
+                else:
+                    log.error("Couldn't delete group {}\n{}".format(group_obj.get("ldapGroupDn"), resp.content))
+                    return False
 
 
 class xml_changer(object):
