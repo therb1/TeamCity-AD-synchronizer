@@ -23,9 +23,13 @@ verify_certificate - SSL yes/no
 
 [xml]
 path_ldap_mapping - There should be path of ldap-mapping.xml file with one or more group mappings defined.
+
+[ad]
+cache_file = Cache database name
+cache_ttl = Cache time
 ```
 
 ### An example of running
 ```
-python3 ad_group_synchronizer.py -f synchronizer.conf
+python3 ad_synchronizer.py -f synchronizer.conf
 ```
