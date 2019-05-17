@@ -8,6 +8,9 @@ Teamcity side python application. For sync groups from Active directory special 
 
 ### Configuration structure synchronizer.conf
 ```
+[common]
+sync_interval - Period between sync processes (seconds)
+
 [ldap]
 uri - Active directory(AD) domain controller address
 binduser - Username of AD integration user.
