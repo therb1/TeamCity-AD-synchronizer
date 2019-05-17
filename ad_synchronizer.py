@@ -11,6 +11,7 @@ import json
 from threading import Event
 from loginit import initLog
 from diskcache import Cache
+import time
 
 def get_args():
     def _usage():
@@ -42,6 +43,7 @@ class createConfig(object):
     """
     def __init__(self, parser):
         try:
+                self.sync_interval = parser.get('common', 'sync_interval')
                 self.ldap_uri = parser.get('ldap', 'uri')
                 self.ldap_user = parser.get('ldap', 'binduser')
                 self.ldap_pass = parser.get('ldap', 'bindpass')
@@ -311,6 +313,9 @@ def main():
 
     # Create config object from config file
     config = createConfig(parser)
+
+    # Interval between syncs
+    time.sleep(int(config.sync_interval))
 
     # Connect to LDAP
     with LDAPConnector(args, config) as ldap_conn:
